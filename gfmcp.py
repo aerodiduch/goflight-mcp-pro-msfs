@@ -178,7 +178,7 @@ class Bridge:
         self.watches = []
         self.watch_ids = itertools.count(WATCH_BASE)
         self.test_mode = False
-        self.test_vals = {"crs_l": 0, "ias": 250, "hdg": 0, "alt": 10000, "vs": 0, "crs_r": 0}
+        self.test_vals = {"crs_l": 0, "ias": 250, "hdg": 67, "alt": 10000, "vs": 0, "crs_r": 0}
         self.test_leds = set()
 
     def reset_sim_state(self):
