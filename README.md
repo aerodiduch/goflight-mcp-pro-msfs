@@ -2,7 +2,7 @@
 
 A small bridge that makes the GoFlight MCP Pro work with Microsoft Flight Simulator 2024 (and 2020), with full support for the PMDG 737 through its official SDK.
 
-GoFlight is gone, their drivers are hard to find, and the paid tools I tried left the MCP Pro displays dark with the PMDG 737 in MSFS 2024. So I wrote this. It talks to the panel directly over USB and to the sim over SimConnect. No GoFlight drivers, no extra Python packages.
+I got this MCP Pro from a friend who was upgrading his sim. GoFlight is gone, their drivers are hard to find, and the only tool I found for MSFS 2024 has known issues with the PMDG 737 (the displays stay dark). So I spent a few days figuring out how the panel works and wrote this. It talks to the panel directly over USB and to the sim over SimConnect. No GoFlight drivers, no extra Python packages.
 
 Tested with MSFS 2024 (Microsoft Store), PMDG 737-800 v4.0.63 and an MCP Pro (USB id 09F3:0064) on Windows 11.
 
