@@ -1,0 +1,7 @@
+# copied from the MSFS SDK by install.py
+SimConnect.dll
+
+*.log
+__pycache__/
+*.pyc
+*.backup*
