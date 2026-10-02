@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GoFlight MCP Pro live view</title>
+<style>
+  :root {
+    --bg: #111418; --panel: #1b2026; --panel2: #232a32; --line: #2f3842;
+    --text: #d7dde4; --muted: #8592a0; --seg-on: #ffb54a; --seg-off: #2b241b;
+    --led: #49e07a; --led-off: #1f3326; --warn: #ffcc4d; --bad: #ff6b6b; --ok: #49e07a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, Segoe UI, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; font-weight: 600; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); font-size: 13px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); }
+  .dot.on { background: var(--ok); }
+  .dot.wait { background: var(--warn); }
+  #statusline { color: var(--muted); font-size: 13px; padding: 6px 16px 0; }
+  main { padding: 12px 16px 24px; }
+  .mcp-wrap { overflow-x: auto; padding-bottom: 6px; }
+  .mcp { display: flex; gap: 10px; min-width: 1180px; background: linear-gradient(#262d35, #1c2229); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .unit { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 0 6px; }
+  .unit + .unit { border-left: 1px solid #323b45; }
+  .label { font-size: 11px; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; }
+  .display { display: flex; gap: 2px; background: #0b0d0f; padding: 6px 8px; border-radius: 4px; border: 1px solid #000; }
+  .display svg { width: 20px; height: 32px; }
+  .seg { fill: var(--seg-off); }
+  .seg.on { fill: var(--seg-on); filter: drop-shadow(0 0 2px rgba(255,181,74,.6)); }
+  .knob { display: flex; gap: 4px; align-items: center; }
+  .knob button { width: 30px; height: 26px; }
+  .knob .delta { min-width: 30px; text-align: center; font-size: 12px; color: var(--warn); }
+  button { background: var(--panel2); color: var(--text); border: 1px solid #3a4550; border-radius: 5px; cursor: pointer; font: inherit; }
+  button:hover { border-color: #5a6876; }
+  .btn { width: 74px; padding: 5px 0 6px; font-size: 12px; font-weight: 600; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .btn .led { width: 34px; height: 5px; border-radius: 2px; background: var(--led-off); }
+  .btn.lit .led { background: var(--led); box-shadow: 0 0 6px var(--led); }
+  .btn.pressed { outline: 2px solid var(--warn); }
+  .col { display: flex; flex-direction: column; gap: 6px; }
+  .row { display: flex; gap: 6px; }
+  .switch { width: 74px; padding: 6px 0; display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; }
+  .lever { width: 14px; height: 30px; border-radius: 7px; background: #0b0d0f; position: relative; }
+  .lever::after { content: ""; position: absolute; left: 1px; width: 12px; height: 14px; border-radius: 6px; background: #c9d1d9; top: 15px; transition: top .15s; }
+  .lever.up::after { top: 1px; }
+  .lever.unknown::after { background: #55606b; top: 8px; }
+  .switch .led { width: 22px; height: 5px; border-radius: 2px; background: var(--led-off); }
+  .switch.lit .led { background: var(--led); box-shadow: 0 0 6px var(--led); }
+  .sim { font-size: 11px; color: var(--muted); font-weight: 400; }
+  .sim b { color: var(--text); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; margin-top: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
+  .card h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  table { width: 100%; border-collapse: collapse; font: 12px/1.5 ui-monospace, Consolas, monospace; }
+  td { padding: 1px 4px; border-bottom: 1px solid #252c34; vertical-align: top; overflow-wrap: anywhere; }
+  td:first-child { color: var(--muted); width: 55%; }
+  tr.changed td { color: var(--warn); }
+  .scroll { max-height: 320px; overflow: auto; }
+  #log { font: 12px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+  form { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+  input { background: #0f1317; color: var(--text); border: 1px solid #3a4550; border-radius: 5px; padding: 5px 7px; font: 12px ui-monospace, Consolas, monospace; min-width: 0; }
+  input.name { flex: 1 1 180px; }
+  input.small { width: 90px; }
+  form button { padding: 4px 12px; }
+  .hint { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
+  .x { padding: 0 6px; font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>GoFlight MCP Pro</h1>
+  <span class="chip"><span class="dot" id="d-panel"></span>Panel</span>
+  <span class="chip"><span class="dot" id="d-sim"></span>MSFS</span>
+  <span class="chip" id="c-mode">mode</span>
+  <span class="chip" id="c-aircraft">no aircraft</span>
+  <span class="chip" id="c-latency">knob latency -</span>
+</header>
+<div id="statusline">Connecting...</div>
+<main>
+  <div class="mcp-wrap"><div class="mcp" id="mcp"></div></div>
+  <div class="grid">
+    <div class="card"><h2>Aircraft values</h2><div class="scroll"><table id="values"></table></div></div>
+    <div class="card"><h2>Sent to the sim</h2><div class="scroll"><table id="traffic"></table></div></div>
+    <div class="card">
+      <h2>Explorer</h2>
+      <p class="hint">Send any event: K events like <code>AP_MASTER</code> or <code>HEADING_BUG_SET</code>, PMDG names like <code>CMD_A_SWITCH</code>, or a numeric id. Values accept hex (0x20000000 is a left click for PMDG).</p>
+      <form id="f-event"><input class="name" name="ev" placeholder="event name" required><input class="small" name="val" placeholder="value" value="0"><button>Send</button></form>
+      <p class="hint">Watch any variable: <code>AUTOPILOT ALTITUDE LOCK VAR</code> with units <code>feet</code>, or an L:var like <code>L:XMLVAR_Baro1_Mode</code> with <code>number</code>.</p>
+      <form id="f-watch"><input class="name" name="var" placeholder="variable" required><input class="small" name="units" placeholder="units" value="number"><button>Watch</button></form>
+      <table id="watches"></table>
+    </div>
+    <div class="card"><h2>Log</h2><div class="scroll" id="logbox"><div id="log"></div></div></div>
+  </div>
+</main>
+<script>
+const SEGS = [[12,4,36,8],[48,12,8,36],[48,52,8,36],[12,88,36,8],[4,52,8,36],[4,12,8,36],[12,46,36,8]];
+const DISPLAYS = {crs_l: 3, ias: 5, hdg: 3, alt: 5, vs: 5, crs_r: 3};
+const UNITS = [
+  {display: "crs_l", label: "Course", switches: [["fd_l", "F/D"]]},
+  {switches: [["at_arm", "A/T arm"]], buttons: [["n1", "N1"], ["speed", "Speed"]]},
+  {display: "ias", label: "IAS / Mach", buttons: [["co", "C/O"], ["spd_intv", "SPD INTV"]]},
+  {buttons: [["vnav", "VNAV"], ["lvl_chg", "LVL CHG"]]},
+  {display: "hdg", label: "Heading", buttons: [["hdg_sel", "HDG SEL"], ["hdg_push", "Bank"]]},
+  {buttons: [["lnav", "LNAV"], ["vor_loc", "VOR LOC"], ["app", "APP"]]},
+  {display: "alt", label: "Altitude", buttons: [["alt_hld", "ALT HLD"], ["alt_intv", "ALT INTV"]]},
+  {display: "vs", label: "V/S", buttons: [["vs", "V/S"]]},
+  {grid: [["cmd_a", "CMD A"], ["cmd_b", "CMD B"], ["cws_a", "CWS A"], ["cws_b", "CWS B"]], switches: [["disengage", "Disengage"]]},
+  {display: "crs_r", label: "Course", switches: [["fd_r", "F/D"]]},
+];
+const $ = (s) => document.querySelector(s);
+let state = {}, prevValues = {}, changedAt = {};
+
+function post(action) {
+  return fetch("/action", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(action)});
+}
+
+function digitSvg() {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 66 100");
+  const g = document.createElementNS(ns, "g");
+  g.setAttribute("transform", "skewX(-6) translate(6 0)");
+  SEGS.forEach(([x, y, w, h]) => {
+    const r = document.createElementNS(ns, "rect");
+    Object.entries({x, y, width: w, height: h, rx: 3, class: "seg"}).forEach(([k, v]) => r.setAttribute(k, v));
+    g.appendChild(r);
+  });
+  const dp = document.createElementNS(ns, "circle");
+  Object.entries({cx: 58, cy: 92, r: 4.5, class: "seg"}).forEach(([k, v]) => dp.setAttribute(k, v));
+  g.appendChild(dp);
+  svg.appendChild(g);
+  return svg;
+}
+
+function button(name, label) {
+  const b = document.createElement("button");
+  b.className = "btn";
+  b.id = "b-" + name;
+  b.innerHTML = `<span class="led"></span>${label}`;
+  b.onclick = () => post({type: "press", name});
+  return b;
+}
+
+function switchEl(name, label) {
+  const b = document.createElement("button");
+  b.className = "switch";
+  b.id = "s-" + name;
+  b.innerHTML = `${name === "disengage" ? "" : '<span class="led"></span>'}<span class="lever unknown"></span>${label}<span class="sim">sim <b>-</b></span>`;
+  b.title = "Click to toggle the switch in the sim";
+  b.onclick = () => post({type: "switch", name, on: !(state.sim_switches || {})[name]});
+  return b;
+}
+
+function knobEl(name) {
+  const k = document.createElement("div");
+  k.className = "knob";
+  k.innerHTML = `<button title="Shift click for 10">&minus;</button><span class="delta" id="k-${name}"></span><button title="Shift click for 10">+</button>`;
+  const [minus, , plus] = k.children;
+  minus.onclick = (e) => post({type: "knob", name, delta: e.shiftKey ? -10 : -1});
+  plus.onclick = (e) => post({type: "knob", name, delta: e.shiftKey ? 10 : 1});
+  return k;
+}
+
+function buildPanel() {
+  const mcp = $("#mcp");
+  for (const u of UNITS) {
+    const el = document.createElement("div");
+    el.className = "unit";
+    if (u.display) {
+      el.insertAdjacentHTML("beforeend", `<div class="label">${u.label}</div>`);
+      const d = document.createElement("div");
+      d.className = "display";
+      d.id = "d-" + u.display;
+      for (let i = 0; i < DISPLAYS[u.display]; i++) d.appendChild(digitSvg());
+      el.appendChild(d);
+      el.appendChild(knobEl(u.display));
+    }
+    const row = document.createElement("div");
+    row.className = "row";
+    for (const [n, l] of u.switches || []) row.appendChild(switchEl(n, l));
+    const col = document.createElement("div");
+    col.className = "col";
+    for (const [n, l] of u.buttons || []) col.appendChild(button(n, l));
+    if (u.grid) {
+      for (let i = 0; i < u.grid.length; i += 2) {
+        const r = document.createElement("div");
+        r.className = "row";
+        r.appendChild(button(...u.grid[i]));
+        r.appendChild(button(...u.grid[i + 1]));
+        col.appendChild(r);
+      }
+    }
+    if (row.children.length) el.appendChild(row);
+    if (col.children.length) el.appendChild(col);
+    mcp.appendChild(el);
+  }
+}
+
+function renderDisplays(displays) {
+  for (const [name, cells] of Object.entries(displays || {})) {
+    const svgs = $("#d-" + name).children;
+    cells.forEach((byte, i) => {
+      const segs = svgs[i].querySelectorAll(".seg");
+      segs.forEach((s, bit) => s.classList.toggle("on", !!(byte & (1 << bit))));
+    });
+  }
+}
+
+function fmt(v) {
+  if (v === null || v === undefined) return "-";
+  if (typeof v === "number" && !Number.isInteger(v)) return v.toFixed(3);
+  if (Array.isArray(v)) return v.map(fmt).join(", ");
+  return String(v);
+}
+
+function render(s) {
+  state = s;
+  $("#d-panel").className = "dot" + (s.panel ? " on" : "");
+  $("#d-sim").className = "dot" + (s.sim ? " on" : "");
+  const modes = {pmdg: "PMDG 737", generic: "Generic", pmdg_wait: "PMDG, waiting for SDK", waiting: "No aircraft", nosim: "No sim"};
+  $("#c-mode").textContent = modes[s.mode] || s.mode;
+  $("#c-aircraft").textContent = s.aircraft || "no aircraft";
+  $("#c-latency").textContent = "knob latency " + (s.latency_ms == null ? "-" : s.latency_ms + " ms");
+  $("#statusline").textContent = s.status || "";
+  renderDisplays(s.displays);
+  const leds = new Set(s.leds || []), pressed = new Set(s.pressed || []);
+  document.querySelectorAll(".btn").forEach((b) => {
+    const n = b.id.slice(2);
+    b.classList.toggle("lit", leds.has(n));
+    b.classList.toggle("pressed", pressed.has(n));
+  });
+  const hw = s.hw_switches || {}, sim = s.sim_switches || {};
+  document.querySelectorAll(".switch").forEach((b) => {
+    const n = b.id.slice(2);
+    const lever = b.querySelector(".lever");
+    lever.className = "lever" + (n in hw ? (hw[n] ? " up" : "") : " unknown");
+    b.classList.toggle("lit", leds.has(n));
+    b.querySelector(".sim b").textContent = n in sim ? (sim[n] ? "ON" : "OFF") : "-";
+  });
+  for (const k of Object.keys(DISPLAYS)) {
+    const d = (s.knobs || {})[k];
+    $("#k-" + k).textContent = d ? (d > 0 ? "+" + d : d) : "";
+  }
+  const now = Date.now(), vals = s.values || {};
+  for (const [k, v] of Object.entries(vals)) {
+    const f = fmt(v);
+    if (prevValues[k] !== undefined && prevValues[k] !== f) changedAt[k] = now;
+    prevValues[k] = f;
+  }
+  $("#values").innerHTML = Object.entries(vals).map(([k, v]) =>
+    `<tr class="${now - (changedAt[k] || 0) < 1500 ? "changed" : ""}"><td>${k}</td><td>${fmt(v)}</td></tr>`).join("") ||
+    "<tr><td>No aircraft data yet</td><td></td></tr>";
+  $("#traffic").innerHTML = (s.traffic || []).slice().reverse().map((t) =>
+    `<tr><td>${t.t} ${t.event}</td><td>${t.data}</td></tr>`).join("") || "<tr><td>Nothing sent yet</td><td></td></tr>";
+  $("#watches").innerHTML = (s.watches || []).map((w) =>
+    `<tr><td>${w.name} <span class="sim">${w.units}</span></td><td>${fmt(w.value)} <button class="x" data-n="${encodeURIComponent(w.name)}">remove</button></td></tr>`).join("");
+}
+
+$("#watches").onclick = (e) => {
+  if (e.target.dataset.n) post({type: "unwatch", name: decodeURIComponent(e.target.dataset.n)});
+};
+$("#f-event").onsubmit = (e) => {
+  e.preventDefault();
+  const f = e.target.elements;
+  post({type: "event", name: f.ev.value, value: f.val.value});
+};
+$("#f-watch").onsubmit = (e) => {
+  e.preventDefault();
+  const f = e.target.elements;
+  post({type: "watch", name: f.var.value, units: f.units.value});
+  f.var.value = "";
+};
+
+function addLog(lines) {
+  if (!lines.length) return;
+  const box = $("#logbox"), atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+  const log = $("#log");
+  log.textContent += lines.join("\n") + "\n";
+  if (log.textContent.length > 60000) log.textContent = log.textContent.slice(-40000);
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+function connect() {
+  const es = new EventSource("/stream");
+  es.onmessage = (m) => {
+    const msg = JSON.parse(m.data);
+    render(msg.state);
+    addLog(msg.log);
+  };
+  es.onerror = () => {
+    $("#statusline").textContent = "Bridge not running. Retrying...";
+    $("#d-panel").className = $("#d-sim").className = "dot";
+  };
+}
+
+buildPanel();
+connect();
+</script>
+</body>
+</html>

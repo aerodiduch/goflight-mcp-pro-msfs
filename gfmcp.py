@@ -5,9 +5,12 @@ python gfmcp.py --auto     started by MSFS (exe.xml): minimized, exits when the 
 python gfmcp.py --verbose  log every input and every MCP change
 python gfmcp.py --test     panel test without the simulator
 """
+import collections
 import configparser
 import ctypes
+import itertools
 import os
+import queue
 import re
 import struct
 import sys
@@ -16,17 +19,27 @@ import time
 import panel as mcp
 import pmdg737
 import simconnect as sc_api
+import web
 from simconnect import SimConnect, SimConnectError
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(HERE, "gfmcp.log")
+LOG_LINES = collections.deque(maxlen=400)
+_log_seq = itertools.count(1)
 _logf = None
 
 
-def log(msg):
+def stamp(now=None):
+    now = time.time() if now is None else now
+    return time.strftime("%H:%M:%S", time.localtime(now)) + ".%03d" % int((now % 1) * 1000)
+
+
+def log(msg, console=True):
     global _logf
-    now = time.time()
-    line = time.strftime("%H:%M:%S", time.localtime(now)) + ".%03d " % int((now % 1) * 1000) + msg
+    line = stamp() + " " + msg
+    LOG_LINES.append((next(_log_seq), line))
+    if not console:
+        return
     print(line, flush=True)
     try:
         if _logf is None:
@@ -44,6 +57,7 @@ def load_config():
         "panel": {"brightness": "15"},
         "pmdg": {"knob_mode": "set", "wheel_up_increases": "yes", "hdg_push": "bank_angle"},
         "steps": {"alt": "100", "alt_fast": "1000", "alt_fast_threshold": "99"},
+        "web": {"enabled": "yes", "port": "8737"},
     })
     cfg.read(os.path.join(HERE, "config.ini"), encoding="utf-8")
     return cfg
@@ -112,6 +126,11 @@ GENERIC_BUTTONS = {
     "n1": "AP_N1_HOLD", "co": "AP_MANAGED_SPEED_IN_MACH_TOGGLE",
 }
 
+EVENT_NAMES = {eid: "PMDG " + name for name, eid in pmdg737.EVT.items()}
+EVENT_NAMES.update({eid: name for name, eid in GEN.items()})
+CUSTOM_EVENT_BASE = 5000
+WATCH_BASE = 100
+
 TARGET_HOLD_S = 1.5
 SWITCH_DEBOUNCE_S = 0.12
 
@@ -149,6 +168,15 @@ class Bridge:
         self.switch_committed = {}
         self.status = None
         self.exit_with_sim = False
+        self.actions = queue.Queue()
+        self.snapshot = {}
+        self.next_publish = 0.0
+        self.traffic = collections.deque(maxlen=60)
+        self.flash = {}
+        self.knob_seen = {}
+        self.latency_ms = None
+        self.watches = []
+        self.watch_ids = itertools.count(WATCH_BASE)
 
     def reset_sim_state(self):
         self.pmdg = None
@@ -157,6 +185,7 @@ class Bridge:
         self.aircraft_path = ""
         self.targets = {}
         self.next_pmdg_request = 0.0
+        self.custom_events = {}
 
     def is_pmdg737(self):
         # livery titles don't say PMDG ("737-800 PAX BW HD"), the aircraft path does
@@ -243,6 +272,8 @@ class Bridge:
         sc.map_client_data(pmdg737.DATA_NAME, pmdg737.DATA_ID)
         sc.add_client_data_def(pmdg737.DATA_DEFINITION, 0, self.layout["_size"])
         self.request_pmdg()
+        for w in self.watches:
+            self.register_watch(w)
         log("Connected to Microsoft Flight Simulator.")
 
     def request_pmdg(self):
@@ -293,7 +324,14 @@ class Bridge:
                         log(f"PMDG: {diff}")
         elif rid == sc_api.RECV_ID_SIMOBJECT_DATA:
             req, _define, payload = sc_api.parse_object_data(raw)
-            if req == REQ_GENERIC:
+            if req >= WATCH_BASE:
+                for w in self.watches:
+                    if w["id"] == req:
+                        if w["units"] == "string":
+                            w["value"] = payload[:256].split(b"\0", 1)[0].decode("utf-8", "replace")
+                        else:
+                            w["value"] = struct.unpack_from("<d", payload, 0)[0]
+            elif req == REQ_GENERIC:
                 vals = struct.unpack_from("<%dd" % len(GENERIC_VARS), payload, 0)
                 self.generic = dict(zip(GENERIC_KEYS, vals))
             elif req == REQ_TITLE:
@@ -315,8 +353,7 @@ class Bridge:
                 self.aircraft_changed()
         elif rid == sc_api.RECV_ID_EXCEPTION:
             exc, send_id, index = sc_api.parse_exception(raw)
-            if self.verbose:
-                log(f"SimConnect exception {exc} (packet {send_id}, parameter {index})")
+            log(f"SimConnect exception {exc} (packet {send_id}, parameter {index})", console=self.verbose)
         elif rid == sc_api.RECV_ID_QUIT:
             self.drop_sim("simulator closed")
 
@@ -324,7 +361,10 @@ class Bridge:
         # keep showing/using our last requested value until the sim catches up
         t = self.targets.get(name)
         if t:
-            if t[0] == sim_value or time.monotonic() - t[1] > TARGET_HOLD_S:
+            age = time.monotonic() - t[1]
+            if t[0] == sim_value or age > TARGET_HOLD_S:
+                if t[0] == sim_value:
+                    self.latency_ms = round(age * 1000)
                 del self.targets[name]
                 return sim_value
             return t[0]
@@ -336,6 +376,7 @@ class Bridge:
     def send(self, event_id, data=0):
         if not self.sc.connected:
             return
+        self.traffic.append({"t": stamp(), "event": EVENT_NAMES.get(event_id, str(event_id)), "data": data})
         t = time.perf_counter()
         try:
             self.sc.transmit(event_id, data)
@@ -356,12 +397,14 @@ class Bridge:
                 log(f"Panel: {ev}")
             kind = ev[0]
             if kind == "knob":
+                self.knob_seen[ev[1]] = (ev[2], time.monotonic())
                 self.on_knob(ev[1], ev[2])
             elif kind in ("press", "release"):
                 name = ev[1]
                 if name in mcp.SWITCHES:
                     self.pending_switch[name] = (kind == "press", time.monotonic())
                 elif kind == "press":
+                    self.flash[name] = time.monotonic()
                     self.on_button(name)
             elif kind == "switch_init":
                 # first report after connecting: line up F/D and A/T ARM with the hardware
@@ -369,6 +412,121 @@ class Bridge:
                 self.switch_committed[name] = on
                 if name != "disengage" and self.mode() in ("pmdg", "generic"):
                     self.on_switch(name, on)
+
+    def apply_actions(self):
+        while True:
+            try:
+                a = self.actions.get_nowait()
+            except queue.Empty:
+                return
+            kind, name = a.get("type"), str(a.get("name", "")).strip()
+            active = self.mode() in ("pmdg", "generic")
+            if kind in ("press", "knob", "switch") and not active:
+                log(f"Live view: {name} ignored, no aircraft linked")
+            elif kind == "press" and name in mcp.INPUTS and name not in mcp.SWITCHES:
+                self.flash[name] = time.monotonic()
+                self.on_button(name)
+            elif kind == "knob" and name in mcp.KNOBS:
+                delta = clamp(int(a.get("delta", 1)), -50, 50)
+                self.knob_seen[name] = (delta, time.monotonic())
+                self.on_knob(name, delta)
+            elif kind == "switch" and name in mcp.SWITCHES:
+                self.on_switch(name, bool(a.get("on")))
+            elif kind == "event" and name:
+                self.send_custom(name, a.get("value", 0))
+            elif kind == "watch" and name:
+                self.add_watch(name, str(a.get("units") or "number").strip())
+            elif kind == "unwatch":
+                self.remove_watch(name)
+
+    def send_custom(self, name, value):
+        if not self.sc.connected:
+            log("Live view: not connected to MSFS")
+            return
+        try:
+            data = int(str(value).strip() or "0", 0)
+        except ValueError:
+            log(f"Live view: bad value {value!r}")
+            return
+        key = name.upper()
+        if key in pmdg737.EVT:
+            eid = pmdg737.EVT[key]
+        else:
+            sim_name = "#" + name if name.isdigit() else key
+            if sim_name not in self.custom_events:
+                eid = CUSTOM_EVENT_BASE + len(self.custom_events)
+                try:
+                    self.sc.map_event(eid, sim_name)
+                except SimConnectError as e:
+                    log(f"Live view: {e}")
+                    return
+                self.custom_events[sim_name] = eid
+                EVENT_NAMES[eid] = sim_name
+            eid = self.custom_events[sim_name]
+        log(f"Live view: sending {name} = {data}")
+        self.send(eid, data)
+
+    def add_watch(self, name, units):
+        if any(w["name"] == name for w in self.watches):
+            return
+        w = {"id": next(self.watch_ids), "name": name, "units": units, "value": None}
+        self.watches.append(w)
+        if self.sc.connected:
+            self.register_watch(w)
+
+    def register_watch(self, w):
+        try:
+            if w["units"] == "string":
+                self.sc.add_data_def(w["id"], w["name"], None, sc_api.DATATYPE_STRING256)
+            else:
+                self.sc.add_data_def(w["id"], w["name"], w["units"])
+            self.sc.request_data(w["id"], w["id"], sc_api.PERIOD_VISUAL_FRAME, sc_api.DATA_REQUEST_FLAG_CHANGED)
+        except SimConnectError as e:
+            log(f"Live view: could not watch {w['name']} ({e})")
+
+    def remove_watch(self, name):
+        for w in list(self.watches):
+            if w["name"] == name:
+                self.watches.remove(w)
+                if self.sc.connected:
+                    try:
+                        self.sc.request_data(w["id"], w["id"], sc_api.PERIOD_NEVER, 0)
+                    except SimConnectError:
+                        pass
+
+    def sim_switches(self):
+        m = self.mode()
+        if m == "pmdg":
+            d = self.pmdg
+            return {"fd_l": d["MCP_FDSw"][0], "fd_r": d["MCP_FDSw"][1], "at_arm": d["MCP_ATArmSw"],
+                    "disengage": d["MCP_DisengageBar"]}
+        if m == "generic":
+            g = self.generic
+            return {"fd_l": bool(g["fd"]), "fd_r": bool(g["fd"]), "at_arm": bool(g["at_arm"]), "disengage": False}
+        return {}
+
+    def publish(self, vals, leds):
+        now = time.monotonic()
+        reports = mcp.build_reports(vals, leds)
+        self.snapshot = {
+            "t": time.time(),
+            "status": self.status,
+            "mode": self.mode(),
+            "panel": self.panel is not None,
+            "sim": self.sc.connected,
+            "aircraft": self.title,
+            "path": self.aircraft_path,
+            "displays": {name: list(reports[name][1:]) for name in mcp.DISPLAYS},
+            "leds": sorted(leds),
+            "hw_switches": self.panel.switch_state if self.panel else {},
+            "sim_switches": self.sim_switches(),
+            "pressed": [k for k, t in self.flash.items() if now - t < 0.35],
+            "knobs": {k: d for k, (d, t) in self.knob_seen.items() if now - t < 0.6},
+            "values": self.pmdg if self.mode() == "pmdg" else self.generic,
+            "traffic": list(self.traffic)[-25:],
+            "watches": [{"name": w["name"], "units": w["units"], "value": w["value"]} for w in self.watches],
+            "latency_ms": self.latency_ms,
+        }
 
     def commit_switches(self):
         now = time.monotonic()
@@ -582,11 +740,15 @@ class Bridge:
                 log(f"MSFS took {dt * 1000:.0f} ms to respond (sim stutter).")
             if events:
                 self.handle_events(events)
+            self.apply_actions()
             self.commit_switches()
             self.set_status()
+            vals, leds = self.view()
             if self.panel is not None:
-                vals, leds = self.view()
                 self.panel.show(vals, leds)
+            if time.monotonic() >= self.next_publish:
+                self.next_publish = time.monotonic() + 0.1
+                self.publish(vals, leds)
 
     def shutdown(self):
         if self.panel is not None:
@@ -648,6 +810,8 @@ def main():
     if "--verbose" in sys.argv:
         cfg.set("general", "verbose", "yes")
     bridge = Bridge(cfg)
+    if cfg.getboolean("web", "enabled"):
+        web.WebUI(bridge, LOG_LINES, cfg.getint("web", "port"), log).start()
     if "--auto" in sys.argv:
         hwnd = ctypes.windll.kernel32.GetConsoleWindow()
         if hwnd:

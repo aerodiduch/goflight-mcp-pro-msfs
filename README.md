@@ -22,11 +22,13 @@ With any other aircraft there is a basic generic mode using the default MSFS aut
 
 It also starts by itself with MSFS (through `exe.xml`), runs minimized, and closes when you quit the sim.
 
+While it runs there is a live view at http://localhost:8737 with a virtual copy of the panel, the aircraft values, everything sent to the sim and a small explorer to try events and variables. See [Live view](#live-view).
+
 ## What it doesn't do
 
 - Only the MCP Pro. No EFIS, GF-166 or other GoFlight modules.
 - PMDG 777 is not supported (different SDK). It falls back to generic mode, which the 777 mostly ignores.
-- Generic mode is basic. VNAV, CWS, ALT INTV and SPD INTV do nothing there, and LNAV and VOR LOC both map to NAV hold. Study level aircraft that don't use the default autopilot (Fenix, iFly and so on) won't respond.
+- Generic mode is basic. VNAV, CWS, ALT INTV and SPD INTV do nothing there, and LNAV and VOR LOC both map to NAV hold. Aircraft with their own autopilot logic (Fenix, iFly, some of the new MSFS 2024 airliners) ignore the default events and need their own mapping. The explorer in the live view is the easiest way to find out what a given aircraft listens to.
 - Windows only. No X-Plane, P3D or FSX.
 - Steam installs and MSFS 2020 should work (the paths are handled) but I have only tested MSFS 2024 from the Microsoft Store.
 
@@ -91,6 +93,16 @@ Normally there is nothing to do, MSFS starts it. Other ways to run it:
 
 The last session is logged to `gfmcp.log`.
 
+### Live view
+
+Open http://localhost:8737 while the bridge is running. It only listens on localhost.
+
+- **Panel**: the six displays and all LEDs exactly as they are sent to the hardware, the physical switch positions and the sim state of each switch. Buttons flash when you press them on the real panel. Clicking a button, a switch or the +/- under a display does the same as the hardware (shift click on +/- moves 10).
+- **Aircraft values**: the MCP data coming from the PMDG SDK, or the default autopilot variables in generic mode. Changed values are highlighted.
+- **Sent to the sim**: every event the bridge sends, with its value. The header shows the knob latency, from your last click until the sim reports the new value.
+- **Explorer**: send any event by name (`AP_MASTER`, `HEADING_BUG_SET`, PMDG names like `CMD_A_SWITCH`, or a numeric id) and watch any variable, including L:vars. Handy to figure out how an unsupported aircraft works before mapping it.
+- **Log**: same as the console window.
+
 ### Settings
 
 `config.ini`:
@@ -102,14 +114,17 @@ The last session is logged to `gfmcp.log`.
 | `[pmdg] hdg_push` | bank_angle | What pushing the HEADING knob does, `bank_angle` or `none` |
 | `[steps] alt` | 100 | Feet per altitude click |
 | `[steps] alt_fast_threshold`, `alt_fast` | 99, 1000 | Optional extra altitude acceleration, 99 means off |
+| `[web] enabled`, `port` | yes, 8737 | Live view in the browser |
 
 ## How it works
 
-There are three parts.
+There are four parts.
 
 **Panel (`panel.py`, `hidwin.py`).** The MCP Pro is a plain HID device, so it is opened with the Windows HID API through ctypes. One thread reads input reports (knobs, buttons, switches) and another writes displays and LEDs, each on its own handle. Only what changed gets written, plus a slow background refresh of one report every half second.
 
 **Simulator (`simconnect.py`).** A thin ctypes wrapper around `SimConnect.dll`. With the PMDG it subscribes to the `PMDG_NG3_Data` client data area and sends PMDG control events. In generic mode it reads the standard autopilot variables and sends the standard key events.
+
+**Live view (`web.py`, `ui.html`).** A small HTTP server inside the bridge pushes the current state to the page ten times a second. Clicks on the page are queued and run on the main loop, exactly like hardware input.
 
 **Logic (`gfmcp.py`, `pmdg737.py`).** It detects which aircraft is loaded, maps panel events to sim events and builds what the displays should show. The PMDG data layout is computed at startup from the `PMDG_NG3_SDK.h` that ships with the aircraft, so a PMDG update that moves fields around doesn't break it. When you turn a knob the display shows your new value right away and keeps it until the sim confirms it, so it never jumps back while the sim catches up.
 

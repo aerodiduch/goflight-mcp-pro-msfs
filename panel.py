@@ -139,8 +139,8 @@ class MCPPro:
                 self.wr.set_feature_timeout(rep, WRITE_TIMEOUT_MS)
 
     def light_test(self, seconds=0.6):
-        # no decimal points: every segment plus every dot is too much for USB power
-        self.write_now({k: "8" * d for k, (_r, d) in DISPLAYS.items()}, set(LEDS))
+        # dashes and LEDs only: a full load on USB power makes the firmware misbehave
+        self.write_now({k: "-" * d for k, (_r, d) in DISPLAYS.items()}, set(LEDS))
         time.sleep(seconds)
         self.write_now({}, set())
         time.sleep(0.2)
