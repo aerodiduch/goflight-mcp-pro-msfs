@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ALLOWED_HOSTS = ("localhost", "127.0.0.1")
-ACTIONS = {"press", "knob", "switch", "event", "watch", "unwatch"}
+ACTIONS = {"press", "knob", "switch", "event", "watch", "unwatch", "test"}
 
 
 class WebUI:

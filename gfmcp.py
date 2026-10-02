@@ -177,6 +177,9 @@ class Bridge:
         self.latency_ms = None
         self.watches = []
         self.watch_ids = itertools.count(WATCH_BASE)
+        self.test_mode = False
+        self.test_vals = {"crs_l": 0, "ias": 250, "hdg": 0, "alt": 10000, "vs": 0, "crs_r": 0}
+        self.test_leds = set()
 
     def reset_sim_state(self):
         self.pmdg = None
@@ -193,6 +196,12 @@ class Bridge:
         return "pmdg" in s and re.search(r"73[6789]|737|ng3|bbj", s) is not None
 
     def mode(self):
+        real = self.sim_mode()
+        if self.test_mode and real not in ("pmdg", "generic"):
+            return "test"
+        return real
+
+    def sim_mode(self):
         if not self.sc.connected:
             return "nosim"
         known_other = bool(self.aircraft_path) and "pmdg" not in self.aircraft_path.lower()
@@ -212,7 +221,11 @@ class Bridge:
             "pmdg_wait": "PMDG 737 loaded but no SDK data yet. Check EnableDataBroadcast=1 in "
                          "737_Options.ini, or wait until the aircraft finishes loading.",
             "generic": f"Aircraft: {self.title or '?'} (generic mode, default MSFS autopilot).",
+            "test": "Test mode: the panel works on its own, nothing is sent to the sim.",
         }[self.mode()]
+        if self.test_mode and self.sim_mode() in ("pmdg", "generic"):
+            self.test_mode = False
+            log("Aircraft linked, test mode off.")
         if self.panel is None:
             txt = "MCP Pro not connected. " + txt
         if txt != self.status:
@@ -305,7 +318,7 @@ class Bridge:
             for rid, raw in self.sc.dispatch():
                 self.on_recv(rid, raw)
             # the PMDG data area only exists once the aircraft has loaded
-            if self.mode() == "pmdg_wait" and time.monotonic() > self.next_pmdg_request:
+            if self.sim_mode() == "pmdg_wait" and time.monotonic() > self.next_pmdg_request:
                 self.request_pmdg()
         except SimConnectError as e:
             self.drop_sim(str(e))
@@ -410,7 +423,7 @@ class Bridge:
                 # first report after connecting: line up F/D and A/T ARM with the hardware
                 name, on = ev[1], ev[2]
                 self.switch_committed[name] = on
-                if name != "disengage" and self.mode() in ("pmdg", "generic"):
+                if name != "disengage" and self.mode() in ("pmdg", "generic", "test"):
                     self.on_switch(name, on)
 
     def apply_actions(self):
@@ -420,7 +433,7 @@ class Bridge:
             except queue.Empty:
                 return
             kind, name = a.get("type"), str(a.get("name", "")).strip()
-            active = self.mode() in ("pmdg", "generic")
+            active = self.mode() in ("pmdg", "generic", "test")
             if kind in ("press", "knob", "switch") and not active:
                 log(f"Live view: {name} ignored, no aircraft linked")
             elif kind == "press" and name in mcp.INPUTS and name not in mcp.SWITCHES:
@@ -438,6 +451,9 @@ class Bridge:
                 self.add_watch(name, str(a.get("units") or "number").strip())
             elif kind == "unwatch":
                 self.remove_watch(name)
+            elif kind == "test":
+                self.test_mode = bool(a.get("on")) and self.sim_mode() not in ("pmdg", "generic")
+                log("Test mode on." if self.test_mode else "Test mode off.")
 
     def send_custom(self, name, value):
         if not self.sc.connected:
@@ -503,6 +519,8 @@ class Bridge:
         if m == "generic":
             g = self.generic
             return {"fd_l": bool(g["fd"]), "fd_r": bool(g["fd"]), "at_arm": bool(g["at_arm"]), "disengage": False}
+        if m == "test":
+            return {n: n in self.test_leds for n in ("fd_l", "fd_r", "at_arm", "disengage")}
         return {}
 
     def publish(self, vals, leds):
@@ -522,10 +540,11 @@ class Bridge:
             "sim_switches": self.sim_switches(),
             "pressed": [k for k, t in self.flash.items() if now - t < 0.35],
             "knobs": {k: d for k, (d, t) in self.knob_seen.items() if now - t < 0.6},
-            "values": self.pmdg if self.mode() == "pmdg" else self.generic,
+            "values": {"pmdg": self.pmdg, "generic": self.generic, "test": self.test_vals}.get(self.mode()),
             "traffic": list(self.traffic)[-25:],
             "watches": [{"name": w["name"], "units": w["units"], "value": w["value"]} for w in self.watches],
             "latency_ms": self.latency_ms,
+            "test_mode": self.test_mode,
         }
 
     def commit_switches(self):
@@ -547,6 +566,16 @@ class Bridge:
             self.pmdg_knob(name, n)
         elif m == "generic":
             self.generic_knob(name, n)
+        elif m == "test":
+            v = self.test_vals
+            if name in ("hdg", "crs_l", "crs_r"):
+                v[name] = (v[name] + n) % 360
+            elif name == "alt":
+                v[name] = clamp(v[name] + n * 100, 0, 50000)
+            elif name == "vs":
+                v[name] = vs_step(v[name], n)
+            else:
+                v[name] = clamp(v[name] + n, 100, 399)
 
     def on_button(self, name):
         m = self.mode()
@@ -561,6 +590,8 @@ class Bridge:
             evt = GENERIC_BUTTONS.get(name)
             if evt:
                 self.send(GEN[evt], 0)
+        elif m == "test" and name in mcp.LEDS:
+            self.test_leds ^= {name}
 
     def on_switch(self, name, on):
         m = self.mode()
@@ -581,6 +612,8 @@ class Bridge:
                 self.send(GEN["AUTO_THROTTLE_ARM"], 0)
             elif name == "disengage":
                 self.send(GEN["AUTOPILOT_DISENGAGE_SET"], 1 if on else 0)
+        elif m == "test":
+            (self.test_leds.add if on else self.test_leds.discard)(name)
 
     def alt_step(self, n):
         if abs(n) >= self.cfg.getint("steps", "alt_fast_threshold"):
@@ -657,6 +690,10 @@ class Bridge:
             return self.pmdg_view(self.pmdg)
         if m == "generic":
             return self.generic_view(self.generic)
+        if m == "test":
+            v = self.test_vals
+            vals = {k: ("%03d" % x if k in ("hdg", "crs_l", "crs_r") else str(x)) for k, x in v.items()}
+            return vals, self.test_leds & set(mcp.LEDS)
         return {}, set()
 
     def pmdg_view(self, d):

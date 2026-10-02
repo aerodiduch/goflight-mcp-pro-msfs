@@ -102,6 +102,7 @@ Open http://localhost:8737 while the bridge is running. It only listens on local
 - **Sent to the sim**: every event the bridge sends, with its value. The header shows the knob latency, from your last click until the sim reports the new value.
 - **Explorer**: send any event by name (`AP_MASTER`, `HEADING_BUG_SET`, PMDG names like `CMD_A_SWITCH`, or a numeric id) and watch any variable, including L:vars. Handy to figure out how an unsupported aircraft works before mapping it.
 - **Log**: same as the console window.
+- **Test mode** (big button at the top of the page): with no aircraft loaded, the panel works on its own. Knobs change the numbers, buttons toggle their lights and switches light their LEDs, on the page and on the hardware. Nothing is sent to the sim, and it turns itself off when an aircraft gets linked.
 
 ### Settings
 
